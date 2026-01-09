@@ -294,6 +294,32 @@ PKCS12 encryption incompatible. Regenerate with legacy flags (see script).
   /ip service set www-ssl address=192.168.0.0/16
   ```
 
+## Extending to Other Devices
+
+This same approach works for other network devices with modifications:
+
+### QNAP NAS
+
+QNAP uses Apache for its web interface. The script needs to:
+1. Create a combined PEM bundle (cert + chain + key)
+2. SCP to the QNAP device
+3. Use sudo to copy to `/etc/stunnel/stunnel.pem`
+4. Restart the web server: `/etc/init.d/thttpd.sh stop && sleep 2 && /etc/init.d/thttpd.sh start`
+
+### pfSense
+
+pfSense uses a PHP-based configuration system. The script needs to:
+1. Upload cert and key files via SCP to `/tmp/`
+2. Run a PHP script that uses `cert_import()` and `config_set_path()` APIs
+3. Set `system/webgui/ssl-certref` to the new certificate
+4. Restart webConfigurator: `/etc/rc.restart_webgui`
+
+**Note:** pfSense requires root SSH access (no limited user option).
+
+**Gotcha:** pfSense has sshguard which blocks IPs with failed SSH attempts. If connections start timing out, check `pfctl -t sshguard -T show`.
+
+For detailed implementation, see the handler scripts in the companion repository.
+
 ## License
 
 MIT License - See [LICENSE](LICENSE)
