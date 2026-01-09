@@ -184,10 +184,12 @@ If you use wildcard DNS entries on MikroTik, specific entries must come BEFORE t
 16   router.example.com    A   192.168.1.1
 ```
 
-Use `place-before` when adding:
+Use `place-before` and `match-subdomain=yes` when adding:
 ```
-/ip dns static add name=router.example.com address=192.168.1.1 place-before=15
+/ip dns static add name=router.example.com address=192.168.1.1 ttl=1d match-subdomain=yes place-before=15
 ```
+
+**Important:** The `match-subdomain=yes` flag is required for the entry to take precedence over wildcard patterns. Without it, the wildcard may still match first.
 
 ### Certificate Chain Must Be Complete
 
