@@ -1,0 +1,9 @@
+# /etc/cron.d/mikrotik-cert-push
+#
+# Push renewed Let's Encrypt certificates to MikroTik devices
+# Runs daily at 4 AM - script checks fingerprints and only pushes if changed
+#
+# Caddy typically renews certificates ~30 days before expiry
+# Running daily ensures we catch renewals within 24 hours
+
+0 4 * * * root /opt/caddy/mikrotik-cert-push.sh >> /var/log/mikrotik-cert-push.log 2>&1

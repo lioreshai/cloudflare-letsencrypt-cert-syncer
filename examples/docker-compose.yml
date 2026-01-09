@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  caddy:
+    # Image with Cloudflare DNS plugin pre-built
+    image: slothcroissant/caddy-cloudflaredns:latest
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"  # HTTP/3
+    environment:
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+    # Certificate storage - this is where certs are stored
+    # Path inside container: /data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/
+  caddy_config:
+    # Caddy configuration storage

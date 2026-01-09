@@ -1,0 +1,42 @@
+{
+    # Uncomment to enable debug logging
+    # debug
+}
+
+# Cloudflare DNS challenge snippet
+# Reuse this for all domains that need certificates
+(cloudflare) {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+        # Use public DNS for ACME verification (avoids local DNS cache issues)
+        resolvers 1.1.1.1 8.8.8.8
+        # Allow time for DNS propagation
+        propagation_timeout 5m
+    }
+}
+
+# MikroTik devices - add one block per device
+# These only generate certificates, no reverse proxying needed
+
+router.example.com {
+    import cloudflare
+    respond "Certificate endpoint for MikroTik" 200
+}
+
+switch.example.com {
+    import cloudflare
+    respond "Certificate endpoint for MikroTik" 200
+}
+
+ap.example.com {
+    import cloudflare
+    respond "Certificate endpoint for MikroTik" 200
+}
+
+# You can also use Caddy for reverse proxying other services
+# These will also get Let's Encrypt certificates automatically
+
+# homeassistant.example.com {
+#     import cloudflare
+#     reverse_proxy homeassistant:8123
+# }
