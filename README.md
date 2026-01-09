@@ -189,16 +189,45 @@ Use `place-before` when adding:
 /ip dns static add name=router.example.com address=192.168.1.1 place-before=15
 ```
 
+### Certificate Chain Must Be Complete
+
+The PKCS12 import should show `certificates-imported: 2` - both the leaf certificate AND the intermediate (Let's Encrypt E8). If only 1 certificate was imported, browsers will show certificate errors even though `curl -k` works.
+
+**Solution:** Remove the certificate on MikroTik and re-run the push script:
+```
+/certificate remove [find where common-name=router.example.com]
+```
+
+Then re-run the push script - it will detect the missing cert and push again.
+
+Verify the chain:
+```bash
+openssl s_client -connect 192.168.1.1:443 -servername router.example.com </dev/null 2>&1 | head -10
+# Should show depth=0 (leaf) and depth=1 (intermediate)
+```
+
 ## Script Features
 
 The `mikrotik-cert-push.sh` script:
 
 - **Fingerprint comparison** - Only pushes when certificate actually changed
-- **PKCS12 bundling** - Ensures private key association
+- **Per-device selective updates** - Each device is checked independently; only devices with new certs get updated
+- **PKCS12 bundling** - Ensures private key association with full certificate chain
 - **Legacy encryption** - Compatible with MikroTik's crypto support
 - **Automatic cleanup** - Removes temporary files from MikroTik
 - **Logging** - Detailed logs for troubleshooting
 - **Multiple devices** - Configure as many MikroTik devices as needed
+
+Example output showing selective updates:
+```
+Processing router.example.com -> 192.168.1.1
+  Certificate unchanged, skipping push
+Processing switch.example.com -> 192.168.1.2
+  Certificate changed, pushing new cert...
+  [push happens]
+Processing ap.example.com -> 192.168.1.3
+  Certificate unchanged, skipping push
+```
 
 ## Extending to Multiple Devices
 
