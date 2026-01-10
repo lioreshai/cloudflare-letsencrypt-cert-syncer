@@ -94,13 +94,26 @@ generate_test_certificate() {
 }
 
 # Source the actual script to get push_cert function
-# We override config variables for testing
+# We override config variables and wrap ssh/scp for testing
 source_push_cert() {
     # Override configuration for testing
     export CERT_BASE="$SCRIPT_DIR/tmp/certs"
     export LOG_FILE="$SCRIPT_DIR/tmp/test.log"
     export P12_PASS="$TEST_P12_PASS"
-    export SSH_OPTS="-o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=10 -i $SCRIPT_DIR/tmp/test_key -p $MOCK_PORT"
+    # Note: SSH_OPTS doesn't include port - we handle that in wrappers
+    export SSH_OPTS="-o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=10 -i $SCRIPT_DIR/tmp/test_key"
+
+    # Create wrapper for ssh that adds port
+    ssh() {
+        command ssh -p "$MOCK_PORT" "$@"
+    }
+    export -f ssh
+
+    # Create wrapper for scp that adds port (uses -P not -p)
+    scp() {
+        command scp -P "$MOCK_PORT" "$@"
+    }
+    export -f scp
 
     # Source just the functions from the script (not the main execution)
     # Extract and eval just the function definitions
@@ -116,8 +129,8 @@ test_fresh_push() {
 
     source_push_cert
 
-    # Clear any existing state in mock
-    ssh $SSH_OPTS "${MOCK_USER}@${MOCK_HOST}" \
+    # Clear any existing state in mock (use command ssh to bypass wrapper)
+    command ssh -p "$MOCK_PORT" $SSH_OPTS "${MOCK_USER}@${MOCK_HOST}" \
         "/certificate remove [find where common-name=$TEST_DOMAIN]" 2>/dev/null || true
 
     # Run the actual push_cert function
@@ -144,7 +157,7 @@ test_fresh_push() {
 
     # Verify certificate is now on "device"
     local fingerprint
-    fingerprint=$(ssh $SSH_OPTS "${MOCK_USER}@${MOCK_HOST}" \
+    fingerprint=$(command ssh -p "$MOCK_PORT" $SSH_OPTS "${MOCK_USER}@${MOCK_HOST}" \
         ":put [/certificate get [find where common-name=$TEST_DOMAIN] fingerprint]" 2>/dev/null)
 
     if [[ -n "$fingerprint" ]]; then
