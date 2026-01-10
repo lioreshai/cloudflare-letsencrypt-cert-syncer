@@ -1,5 +1,5 @@
 # Test infrastructure for cloudflare-letsencrypt-cert-syncer
-# Provides a mock MikroTik SSH endpoint for integration testing
+# Provides mock SSH endpoints for MikroTik, pfSense, and QNAP testing
 
 services:
   mock-mikrotik:
@@ -11,5 +11,23 @@ services:
       - "2222:22"
     volumes:
       - ./mock-mikrotik/state:/state
-    environment:
-      - SSH_USER=cert-push
+
+  mock-pfsense:
+    build:
+      context: ./mock-pfsense
+    container_name: test-mock-pfsense
+    hostname: mock-pfsense
+    ports:
+      - "2223:22"
+    volumes:
+      - ./mock-pfsense/state:/state
+
+  mock-qnap:
+    build:
+      context: ./mock-qnap
+    container_name: test-mock-qnap
+    hostname: mock-qnap
+    ports:
+      - "2224:22"
+    volumes:
+      - ./mock-qnap/state:/state

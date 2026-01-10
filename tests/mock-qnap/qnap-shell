@@ -1,0 +1,69 @@
+#!/bin/bash
+#
+# Mock QNAP shell for testing cert-push script
+# Simulates QNAP SSH + sudo behavior for certificate operations
+#
+
+STATE_DIR="/state"
+CERT_PATH="/etc/stunnel/stunnel.pem"
+
+# Parse the command passed via SSH -c
+if [[ "$1" == "-c" ]]; then
+    CMD="$2"
+else
+    CMD="$*"
+fi
+
+# Log command for debugging
+echo "[$(date -Iseconds)] CMD: $CMD" >> /state/command.log
+
+# Handle scp (file transfers)
+if [[ "$CMD" =~ ^scp ]]; then
+    exec /usr/bin/scp "$@"
+fi
+
+# Handle echo for readiness checks
+if [[ "$CMD" =~ ^echo.*ready ]]; then
+    echo "ready"
+    exit 0
+fi
+
+# Handle sudo cat for reading certificate
+if [[ "$CMD" =~ sudo.*-S.*cat.*/etc/stunnel/stunnel.pem ]]; then
+    if [[ -f "$STATE_DIR/stunnel.pem" ]]; then
+        cat "$STATE_DIR/stunnel.pem"
+    fi
+    exit 0
+fi
+
+# Handle multi-command sudo operations (certificate installation)
+# This handles the compound command for backup, copy, chmod, chown, rm
+if [[ "$CMD" =~ sudo.*-S.*cp.*stunnel.pem ]]; then
+    # Extract the source PEM file from the command
+    # Command format: echo 'pass' | sudo -S cp ~/domain.pem /etc/stunnel/stunnel.pem
+
+    # Find PEM files in home directory
+    for pem in /home/qnap/*.pem; do
+        if [[ -f "$pem" ]]; then
+            cp "$pem" "$STATE_DIR/stunnel.pem"
+            rm -f "$pem"
+        fi
+    done
+    exit 0
+fi
+
+# Handle web server restart
+if [[ "$CMD" =~ sudo.*-S.*/etc/init.d/thttpd.sh ]]; then
+    echo "Stopping QNAP web server..."
+    echo "Starting QNAP web server..."
+    exit 0
+fi
+
+# Handle rm command for cleanup
+if [[ "$CMD" =~ ^rm ]]; then
+    eval "$CMD" 2>/dev/null || true
+    exit 0
+fi
+
+# Unknown command - log and ignore
+echo "[MOCK] Unknown command: $CMD" >> /state/unknown.log

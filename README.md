@@ -2,25 +2,30 @@
 
 [![Integration Tests](https://github.com/lioreshai/cloudflare-letsencrypt-cert-syncer/actions/workflows/test.yml/badge.svg)](https://github.com/lioreshai/cloudflare-letsencrypt-cert-syncer/actions/workflows/test.yml)
 
-Automatically provision and renew Let's Encrypt SSL certificates for MikroTik RouterOS devices without opening any ports to the internet.
+Automatically provision and renew Let's Encrypt SSL certificates for network devices without opening any ports to the internet.
+
+Supports:
+- **MikroTik RouterOS** - Routers and switches
+- **pfSense** - Firewalls
+- **QNAP** - NAS devices
 
 Uses **Caddy** with **Cloudflare DNS-01 challenge** for secure, firewall-friendly certificate management.
 
 ## The Problem
 
-MikroTik RouterOS has built-in ACME support, but it requires:
+Many network devices have built-in ACME support, but require:
 - Port 80 open to the internet for HTTP-01 challenge
-- The router to be publicly accessible
+- The device to be publicly accessible
 
-For home networks behind NAT or those who don't want to expose their router, this doesn't work.
+For home networks behind NAT or those who don't want to expose management interfaces, this doesn't work.
 
 ## The Solution
 
 Use **Caddy** as a certificate manager with **Cloudflare DNS-01 challenge**:
 
 1. Caddy obtains certificates using DNS validation (no ports needed)
-2. A script pushes renewed certificates to MikroTik via SSH
-3. Daily cron checks for renewals and updates MikroTik automatically
+2. Scripts push renewed certificates to each device via SSH
+3. Daily cron checks for renewals and updates devices automatically
 
 ```
 ┌─────────────────┐     DNS-01      ┌─────────────────┐
@@ -35,15 +40,31 @@ Use **Caddy** as a certificate manager with **Cloudflare DNS-01 challenge**:
 └────────┬────────┘                 └─────────────────┘
          │
          │ Daily cron (only if cert renewed)
-         │ - Compare fingerprints
-         │ - Create PKCS12 bundle
-         │ - SCP to MikroTik
-         │ - Import certificate
          ▼
-┌─────────────────┐
-│    MikroTik     │
-│   www-ssl:443   │
-└─────────────────┘
+┌────────────────────────────────────────────────────┐
+│              cert-push.sh                          │
+│  - Compare fingerprints                            │
+│  - Push only changed certs                         │
+│  - Device-specific handlers                        │
+└────────┬───────────────┬───────────────┬──────────┘
+         │               │               │
+         ▼               ▼               ▼
+    ┌─────────┐    ┌──────────┐    ┌──────────┐
+    │MikroTik │    │ pfSense  │    │   QNAP   │
+    │ PKCS12  │    │ PHP API  │    │   PEM    │
+    └─────────┘    └──────────┘    └──────────┘
+```
+
+## Project Structure
+
+```
+├── cert-push.sh           # Main dispatcher script
+├── lib/
+│   ├── mikrotik.sh        # MikroTik handler (PKCS12)
+│   ├── pfsense.sh         # pfSense handler (PHP API)
+│   └── qnap.sh            # QNAP handler (PEM bundle)
+├── mikrotik-cert-push.sh  # Standalone MikroTik-only script
+└── tests/                 # Integration tests with Docker mocks
 ```
 
 ## Requirements
@@ -52,9 +73,16 @@ Use **Caddy** as a certificate manager with **Cloudflare DNS-01 challenge**:
   - Docker: `slothcroissant/caddy-cloudflaredns` or build your own
 - **Cloudflare** managing your domain's DNS
 - **Cloudflare API token** with Zone:DNS:Edit permission
-- **MikroTik RouterOS 7.x** (tested on 7.20.6)
 - **Linux server** to run Caddy and the push script
-- **SSH key authentication** from Caddy server to MikroTik
+- **SSH key authentication** to target devices
+
+### Device-specific Requirements
+
+| Device | SSH User | Additional |
+|--------|----------|------------|
+| MikroTik RouterOS 7.x | Limited `cert-push` user | ssh,ftp,read,write permissions |
+| pfSense | root | Full access required |
+| QNAP | Any sudo user | SUDO_PASS environment variable |
 
 ## Quick Start
 
@@ -75,15 +103,20 @@ Create a `Caddyfile`:
     }
 }
 
-# Add an entry for each MikroTik device
+# Add an entry for each device
 router.example.com {
     import cloudflare
-    respond "Certificate endpoint for MikroTik" 200
+    respond "Certificate endpoint" 200
 }
 
-switch.example.com {
+firewall.example.com {
     import cloudflare
-    respond "Certificate endpoint for MikroTik" 200
+    respond "Certificate endpoint" 200
+}
+
+nas.example.com {
+    import cloudflare
+    respond "Certificate endpoint" 200
 }
 ```
 
@@ -92,249 +125,188 @@ Create `.env` with your Cloudflare API token:
 CLOUDFLARE_API_TOKEN=your-token-here
 ```
 
-### 2. Create MikroTik user with limited permissions
+### 2. Set up SSH key authentication
 
-```
-# Create restricted group
-/user group add name=cert-push policy=ssh,ftp,read,write
+Deploy your SSH key to each device:
 
-# Create user (password required but SSH key will be used)
-/user add name=cert-push group=cert-push password=random-string-not-used
-```
-
-### 3. Deploy SSH key to MikroTik
-
+**MikroTik:**
 ```bash
-# Copy your public key to MikroTik
 scp ~/.ssh/id_rsa.pub admin@192.168.1.1:server.pub
-
-# On MikroTik, import for cert-push user
+# On MikroTik:
 /user ssh-keys import user=cert-push public-key-file=server.pub
 /file remove server.pub
 ```
 
-### 4. Install the push script
+**pfSense:**
+```bash
+ssh-copy-id root@192.168.1.254
+```
 
-Copy `mikrotik-cert-push.sh` to your Caddy server and configure:
+**QNAP:**
+```bash
+ssh-copy-id admin@192.168.1.100
+```
+
+### 3. Create MikroTik user (MikroTik only)
+
+```
+/user group add name=cert-push policy=ssh,ftp,read,write
+/user add name=cert-push group=cert-push password=random-string-not-used
+```
+
+### 4. Install and configure
 
 ```bash
-# Edit the script to set your certificate path and devices
-sudo cp mikrotik-cert-push.sh /opt/caddy/mikrotik-cert-push.sh
-sudo chmod +x /opt/caddy/mikrotik-cert-push.sh
+git clone https://github.com/lioreshai/cloudflare-letsencrypt-cert-syncer.git
+cd cloudflare-letsencrypt-cert-syncer
+
+# Edit cert-push.sh to configure your devices and CERT_BASE path
+vim cert-push.sh
+```
+
+Configure devices in the main section:
+```bash
+# MikroTik devices
+push_cert mikrotik "router.example.com" "192.168.1.1" "cert-push"
+push_cert mikrotik "switch.example.com" "192.168.1.2" "cert-push"
+
+# pfSense firewall
+push_cert pfsense "firewall.example.com" "192.168.1.254" "root"
+
+# QNAP NAS (set SUDO_PASS environment variable)
+push_cert qnap "nas.example.com" "192.168.1.100" "admin"
 ```
 
 ### 5. Run initial push
 
 ```bash
-sudo /opt/caddy/mikrotik-cert-push.sh
+# For QNAP targets, set sudo password
+export SUDO_PASS="your-sudo-password"
+
+./cert-push.sh
 ```
 
 ### 6. Set up cron for automatic renewal
 
-Create `/etc/cron.d/mikrotik-cert-push`:
+Create `/etc/cron.d/cert-push`:
 ```
 # Check daily at 4 AM for renewed certificates
-0 4 * * * root /opt/caddy/mikrotik-cert-push.sh >> /var/log/mikrotik-cert-push.log 2>&1
+0 4 * * * root SUDO_PASS="your-sudo-password" /opt/cert-push/cert-push.sh >> /var/log/cert-push.log 2>&1
 ```
 
-## Important Gotchas
+## Device-Specific Details
 
-### PKCS12 Format is Required
+### MikroTik
 
-MikroTik doesn't properly associate private keys when importing separate PEM files. The private key gets imported as a "file" without cryptographic association.
+Uses PKCS12 format with legacy encryption (PBE-SHA1-3DES) for compatibility.
 
-**Solution:** The script creates a PKCS12 bundle with legacy encryption for MikroTik compatibility:
+**Gotchas:**
+- Certificate must show `K` flag (private key associated)
+- PKCS12 import should show `private-keys-imported: 1`
+- Use `certificates-imported: 2` to verify chain is complete
 
-```bash
-openssl pkcs12 -export \
-    -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 \
-    -out cert.p12 -inkey cert.key -in cert.crt \
-    -passout pass:yourpassword
-```
+### pfSense
 
-### Certificate Must Have Private Key Flag
+Uses PHP API via SSH to import certificates and configure webConfigurator.
 
-After importing, verify the certificate shows the `K` flag:
+**Gotchas:**
+- Requires root SSH access
+- sshguard may block IPs with failed attempts (`pfctl -t sshguard -T show`)
+- Restarts webConfigurator after import
 
-```
-/certificate print
-Flags: K - PRIVATE-KEY; L - CRL; T - TRUSTED
-#     NAME           COMMON-NAME
-0 KLT router.p12_0   router.example.com    ✓ Has K flag
-```
+### QNAP
 
-If missing the `K` flag, the private key wasn't associated - re-import using PKCS12.
+Uses combined PEM format (key + cert) and sudo for elevated privileges.
 
-### DNS Cache Can Block ACME Verification
+**Gotchas:**
+- Requires `SUDO_PASS` environment variable
+- Restarts thttpd web server after install
+- Certificate stored at `/etc/stunnel/stunnel.pem`
 
-If your local DNS server caches records, it may interfere with Let's Encrypt's DNS verification.
+## Environment Variables
 
-**Solution:** Flush DNS cache before/during certificate generation:
-```
-/ip dns cache flush
-```
-
-### DNS Entry Order Matters
-
-If you use wildcard DNS entries on MikroTik, specific entries must come BEFORE the wildcard:
-
-```
-# CORRECT - specific entry first
-15   router.example.com    A   192.168.1.1
-16   .*\.example\.com$     A   192.168.1.100
-
-# WRONG - wildcard matches first
-15   .*\.example\.com$     A   192.168.1.100
-16   router.example.com    A   192.168.1.1
-```
-
-Use `place-before` and `match-subdomain=yes` when adding:
-```
-/ip dns static add name=router.example.com address=192.168.1.1 ttl=1d match-subdomain=yes place-before=15
-```
-
-**Important:** The `match-subdomain=yes` flag is required for the entry to take precedence over wildcard patterns. Without it, the wildcard may still match first.
-
-### Certificate Chain Must Be Complete
-
-The PKCS12 import should show `certificates-imported: 2` - both the leaf certificate AND the intermediate (Let's Encrypt E8). If only 1 certificate was imported, browsers will show certificate errors even though `curl -k` works.
-
-**Solution:** Remove the certificate on MikroTik and re-run the push script:
-```
-/certificate remove [find where common-name=router.example.com]
-```
-
-Then re-run the push script - it will detect the missing cert and push again.
-
-Verify the chain:
-```bash
-openssl s_client -connect 192.168.1.1:443 -servername router.example.com </dev/null 2>&1 | head -10
-# Should show depth=0 (leaf) and depth=1 (intermediate)
-```
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CERT_BASE` | Path to Caddy certificate storage | See script |
+| `LOG_FILE` | Log file location | `/var/log/cert-push.log` |
+| `P12_PASS` | PKCS12 password (MikroTik) | `change-this-password` |
+| `SUDO_PASS` | Sudo password (QNAP) | Required for QNAP |
+| `SSH_OPTS` | SSH options | `-o StrictHostKeyChecking=no ...` |
+| `SCP_OPTS` | SCP options | Same as SSH_OPTS |
 
 ## Script Features
 
-The `mikrotik-cert-push.sh` script:
-
 - **Fingerprint comparison** - Only pushes when certificate actually changed
-- **Per-device selective updates** - Each device is checked independently; only devices with new certs get updated
-- **PKCS12 bundling** - Ensures private key association with full certificate chain
-- **Legacy encryption** - Compatible with MikroTik's crypto support
-- **Automatic cleanup** - Removes temporary files from MikroTik
-- **Logging** - Detailed logs for troubleshooting
-- **Multiple devices** - Configure as many MikroTik devices as needed
+- **Per-device selective updates** - Each device checked independently
+- **Device-specific handlers** - Proper format for each device type
+- **Automatic cleanup** - Removes temporary files
+- **Detailed logging** - For troubleshooting
 
-Example output showing selective updates:
+Example output:
 ```
-Processing router.example.com -> 192.168.1.1
+=== Certificate Push Started ===
+Processing router.example.com -> 192.168.1.1 [mikrotik]
   Certificate unchanged, skipping push
-Processing switch.example.com -> 192.168.1.2
+Processing firewall.example.com -> 192.168.1.254 [pfsense]
   Certificate changed, pushing new cert...
-  [push happens]
-Processing ap.example.com -> 192.168.1.3
+  Done! pfSense webConfigurator updated with new certificate
+Processing nas.example.com -> 192.168.1.100 [qnap]
   Certificate unchanged, skipping push
+=== Certificate Push Completed ===
 ```
-
-## Extending to Multiple Devices
-
-Edit the script's main section:
-
-```bash
-# Push to each device
-push_cert "router.example.com" "192.168.1.1" "cert-push"
-push_cert "switch.example.com" "192.168.1.2" "cert-push"
-push_cert "ap.example.com" "192.168.1.3" "cert-push"
-```
-
-Each device needs:
-1. Domain added to Caddyfile
-2. `cert-push` user created
-3. SSH key deployed
 
 ## Troubleshooting
 
-### Certificate not serving (connection refused or invalid cert)
+### Certificate not serving
 
-Check www-ssl service:
+**MikroTik:**
 ```
 /ip service print where name=www-ssl
-```
-
-Verify certificate is assigned and service enabled:
-```
 /ip service set www-ssl certificate=router.example.com.p12_0 disabled=no
 ```
 
-### SCP fails with permission denied
+**pfSense:** Check System > Certificate Manager and System > Advanced > Admin Access
 
-1. Verify SSH key is imported:
-   ```
-   /user ssh-keys print where user=cert-push
-   ```
+**QNAP:** Verify `/etc/stunnel/stunnel.pem` exists and thttpd is running
 
-2. Verify group has `ftp` policy:
-   ```
-   /user group print where name=cert-push
-   ```
+### SCP/SSH fails
 
-### Import shows "decryption-failures: 1"
+1. Verify SSH key authentication works manually
+2. Check user permissions
+3. For pfSense, check sshguard: `pfctl -t sshguard -T show`
 
-PKCS12 encryption incompatible. Regenerate with legacy flags (see script).
+### PKCS12 import shows decryption failures
+
+PKCS12 encryption incompatible. The script uses legacy flags automatically.
 
 ### Caddy fails to obtain certificate
 
 1. Check API token permissions (Zone:DNS:Edit)
 2. Flush local DNS cache
-3. Check Caddy logs: `docker logs caddy 2>&1 | grep your-domain`
+3. Check Caddy logs
 4. Increase `propagation_timeout` if DNS is slow
-
-## Security Considerations
-
-- **Limited permissions** - The `cert-push` user can only manage certificates and services, not full router config
-- **SSH key only** - No password authentication for the automation user
-- **PKCS12 password** - Used only during transport, not stored on MikroTik
-- **Restrict www-ssl access** - Consider limiting to internal networks:
-  ```
-  /ip service set www-ssl address=192.168.0.0/16
-  ```
-
-## Extending to Other Devices
-
-This same approach works for other network devices with modifications:
-
-### QNAP NAS
-
-QNAP uses Apache for its web interface. The script needs to:
-1. Create a combined PEM bundle (cert + chain + key)
-2. SCP to the QNAP device
-3. Use sudo to copy to `/etc/stunnel/stunnel.pem`
-4. Restart the web server: `/etc/init.d/thttpd.sh stop && sleep 2 && /etc/init.d/thttpd.sh start`
-
-### pfSense
-
-pfSense uses a PHP-based configuration system. The script needs to:
-1. Upload cert and key files via SCP to `/tmp/`
-2. Run a PHP script that uses `cert_import()` and `config_set_path()` APIs
-3. Set `system/webgui/ssl-certref` to the new certificate
-4. Restart webConfigurator: `/etc/rc.restart_webgui`
-
-**Note:** pfSense requires root SSH access (no limited user option).
-
-**Gotcha:** pfSense has sshguard which blocks IPs with failed SSH attempts. If connections start timing out, check `pfctl -t sshguard -T show`.
 
 ## Testing
 
-The project includes integration tests to verify the core mechanisms work correctly.
+Integration tests verify all handlers against Docker mock servers.
 
 ```bash
-# Run CI tests (uses mock MikroTik, fast)
-./tests/run_tests.sh
-
-# Run full RouterOS tests (requires KVM, slower but more thorough)
-./tests/run_tests_routeros.sh
+cd tests
+./run_tests.sh
 ```
 
 See [tests/README.md](tests/README.md) for details.
+
+## Standalone MikroTik Script
+
+If you only need MikroTik support, use the standalone `mikrotik-cert-push.sh` which has no dependencies on the `lib/` handlers.
+
+## Security Considerations
+
+- **Limited permissions** - MikroTik `cert-push` user can only manage certificates
+- **SSH key only** - No password authentication for automation
+- **PKCS12 password** - Used only during transport, not stored
+- **Restrict management access** - Consider limiting to internal networks
 
 ## License
 
