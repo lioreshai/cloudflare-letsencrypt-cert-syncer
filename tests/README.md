@@ -2,6 +2,8 @@
 
 Integration tests for `mikrotik-cert-push.sh`.
 
+**Tests the actual `push_cert()` function** from the main script, not a copy. Environment variables redirect SSH/SCP to a mock MikroTik container.
+
 ## Running Tests
 
 ```bash

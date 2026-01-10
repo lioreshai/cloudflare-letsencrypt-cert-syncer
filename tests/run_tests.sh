@@ -2,7 +2,7 @@
 #
 # Integration tests for mikrotik-cert-push.sh
 #
-# Tests the push_cert() function against a mock MikroTik SSH server.
+# Tests the ACTUAL push_cert() function against a mock MikroTik SSH server.
 # The mock accepts SSH commands and simulates certificate storage.
 #
 
@@ -15,8 +15,9 @@ cd "$(dirname "$0")"
 # -----------------------------------------------------------------------------
 
 DOMAIN="test.example.com"
-P12_PASS="test-pass"
 MOCK_PORT="2222"
+MOCK_USER="cert-push"
+MOCK_HOST="127.0.0.1"
 
 # -----------------------------------------------------------------------------
 # Test helpers
@@ -26,18 +27,11 @@ pass() { echo -e "\033[32m[PASS]\033[0m $1"; }
 fail() { echo -e "\033[31m[FAIL]\033[0m $1"; exit 1; }
 info() { echo -e "\033[33m[INFO]\033[0m $1"; }
 
-# SSH to mock MikroTik
+# Direct SSH/SCP to mock (for setup/teardown, not for testing push_cert)
 mock_ssh() {
     ssh -p $MOCK_PORT -i tmp/test_key \
         -o StrictHostKeyChecking=no -o LogLevel=ERROR \
-        cert-push@127.0.0.1 "$@"
-}
-
-# SCP to mock MikroTik
-mock_scp() {
-    scp -P $MOCK_PORT -i tmp/test_key \
-        -o StrictHostKeyChecking=no -o LogLevel=ERROR \
-        "$@"
+        ${MOCK_USER}@${MOCK_HOST} "$@"
 }
 
 # -----------------------------------------------------------------------------
@@ -79,74 +73,35 @@ cleanup() {
 trap cleanup EXIT
 
 # -----------------------------------------------------------------------------
-# The function under test - extracted from mikrotik-cert-push.sh
+# Source the ACTUAL script under test
 # -----------------------------------------------------------------------------
 
-push_cert() {
-    local domain="$1"
-    local host="$2"
-    local user="${3:-cert-push}"
-    local cert_dir="tmp/certs/$domain"
+setup_env_and_source() {
+    # Configure environment to use mock MikroTik (must run after setup creates SSH key)
+    export CERT_BASE="$(pwd)/tmp/certs"
+    export LOG_FILE="$(pwd)/tmp/test.log"
+    export P12_PASS="test-pass"
+    export SSH_OPTS="-p $MOCK_PORT -i $(pwd)/tmp/test_key -o StrictHostKeyChecking=no -o LogLevel=ERROR"
+    export SCP_OPTS="-P $MOCK_PORT -i $(pwd)/tmp/test_key -o StrictHostKeyChecking=no -o LogLevel=ERROR"
 
-    # Check cert exists
-    [[ -f "$cert_dir/$domain.crt" && -f "$cert_dir/$domain.key" ]] || {
-        echo "ERROR: Certificate files not found for $domain"
-        return 1
-    }
-
-    # Get local fingerprint
-    local new_fp=$(openssl x509 -in "$cert_dir/$domain.crt" -noout -fingerprint -sha256 | \
-        cut -d= -f2 | tr -d ':' | tr '[:upper:]' '[:lower:]')
-
-    echo "Processing $domain -> $host"
-    echo "  Local fingerprint: $new_fp"
-
-    # Get remote fingerprint
-    local current_fp=$(mock_ssh ":put [/certificate get [find where common-name=$domain] fingerprint]" 2>/dev/null || true)
-    current_fp=$(echo "$current_fp" | tr -d ':' | tr '[:upper:]' '[:lower:]' | tr -d '\r\n')
-
-    if [[ -n "$current_fp" ]]; then
-        echo "  Remote fingerprint: $current_fp"
-        if [[ "$new_fp" == "$current_fp" ]]; then
-            echo "  Certificate unchanged, skipping"
-            return 0
-        fi
-        echo "  Certificate changed, pushing..."
-    else
-        echo "  No certificate on device, pushing..."
-    fi
-
-    # Create PKCS12 bundle (legacy encryption for MikroTik)
-    openssl pkcs12 -export \
-        -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 \
-        -inkey "$cert_dir/$domain.key" -in "$cert_dir/$domain.crt" \
-        -out "tmp/$domain.p12" -passout "pass:$P12_PASS"
-
-    # Upload and import
-    mock_scp "tmp/$domain.p12" "cert-push@127.0.0.1:$domain.p12"
-    mock_ssh "/certificate remove [find where common-name=$domain]" 2>/dev/null || true
-    mock_ssh "/certificate import file-name=$domain.p12 passphrase=$P12_PASS"
-    mock_ssh "/ip service set www-ssl certificate=$domain.p12_0 disabled=no"
-    mock_ssh "/file remove \"$domain.p12\"" 2>/dev/null || true
-
-    rm -f "tmp/$domain.p12"
-    echo "  Done"
+    # Source the actual script (won't run main due to BASH_SOURCE guard)
+    source ../mikrotik-cert-push.sh
 }
 
 # -----------------------------------------------------------------------------
-# Tests
+# Tests - calling the ACTUAL push_cert() function from mikrotik-cert-push.sh
 # -----------------------------------------------------------------------------
 
 test_fresh_push() {
     info "TEST: Fresh push (no existing cert)"
 
-    # Clear any existing cert
+    # Clear any existing cert on mock
     mock_ssh "/certificate remove [find where common-name=$DOMAIN]" 2>/dev/null || true
 
-    # Push certificate
-    local output=$(push_cert "$DOMAIN" "127.0.0.1" 2>&1)
+    # Call the ACTUAL push_cert function from mikrotik-cert-push.sh
+    local output=$(push_cert "$DOMAIN" "$MOCK_HOST" "$MOCK_USER" 2>&1)
 
-    echo "$output" | grep -q "No certificate on device" || fail "Should detect no existing cert"
+    echo "$output" | grep -q "No existing certificate" || fail "Should detect no existing cert"
     echo "$output" | grep -q "Done" || fail "Should complete push"
 
     # Verify cert exists on device
@@ -159,8 +114,8 @@ test_fresh_push() {
 test_skip_unchanged() {
     info "TEST: Skip unchanged cert"
 
-    # Push same cert again
-    local output=$(push_cert "$DOMAIN" "127.0.0.1" 2>&1)
+    # Call push_cert again with same cert - should skip
+    local output=$(push_cert "$DOMAIN" "$MOCK_HOST" "$MOCK_USER" 2>&1)
 
     echo "$output" | grep -q "unchanged, skipping" || fail "Should skip unchanged cert"
 
@@ -175,8 +130,8 @@ test_push_changed() {
     openssl req -new -x509 -key tmp/certs/$DOMAIN/$DOMAIN.key \
         -out tmp/certs/$DOMAIN/$DOMAIN.crt -days 30 -subj "/CN=$DOMAIN" 2>/dev/null
 
-    # Push new cert
-    local output=$(push_cert "$DOMAIN" "127.0.0.1" 2>&1)
+    # Call push_cert - should detect change and push
+    local output=$(push_cert "$DOMAIN" "$MOCK_HOST" "$MOCK_USER" 2>&1)
 
     echo "$output" | grep -q "changed, pushing" || fail "Should detect changed cert"
     echo "$output" | grep -q "Done" || fail "Should complete push"
@@ -187,7 +142,8 @@ test_push_changed() {
 test_missing_files() {
     info "TEST: Handle missing cert files"
 
-    local output=$(push_cert "nonexistent.example.com" "127.0.0.1" 2>&1) || true
+    # Call push_cert with non-existent domain
+    local output=$(push_cert "nonexistent.example.com" "$MOCK_HOST" "$MOCK_USER" 2>&1) || true
 
     echo "$output" | grep -q "Certificate files not found" || fail "Should report missing files"
 
@@ -197,13 +153,13 @@ test_missing_files() {
 test_pkcs12_format() {
     info "TEST: PKCS12 format is MikroTik-compatible"
 
-    # Create PKCS12 with legacy encryption
+    # Create PKCS12 using same method as the script
     openssl pkcs12 -export \
         -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 \
         -inkey tmp/certs/$DOMAIN/$DOMAIN.key -in tmp/certs/$DOMAIN/$DOMAIN.crt \
         -out tmp/test.p12 -passout "pass:$P12_PASS" 2>/dev/null
 
-    # Verify format
+    # Verify format uses legacy encryption
     local info=$(openssl pkcs12 -in tmp/test.p12 -info -passin "pass:$P12_PASS" -noout 2>&1)
     echo "$info" | grep -qi "sha1\|3des" || fail "Should use legacy encryption"
 
@@ -225,6 +181,7 @@ echo "Integration Tests: mikrotik-cert-push.sh"
 echo "=========================================="
 
 setup
+setup_env_and_source  # Source actual script after setup creates SSH key
 
 test_fresh_push
 test_skip_unchanged

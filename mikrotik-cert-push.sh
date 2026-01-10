@@ -24,24 +24,25 @@
 set -euo pipefail
 
 #######################################
-# CONFIGURATION - Edit these values
+# CONFIGURATION
+# Override via environment variables or edit defaults below
 #######################################
 
 # Path to Caddy's certificate storage
-# Default Docker path: /data/caddy/certificates/acme-v02.api.letsencrypt.org-directory
-CERT_BASE="/path/to/caddy/data/certificates/acme-v02.api.letsencrypt.org-directory"
+CERT_BASE="${CERT_BASE:-/path/to/caddy/data/certificates/acme-v02.api.letsencrypt.org-directory}"
 
 # Log file location
-LOG_FILE="/var/log/mikrotik-cert-push.log"
+LOG_FILE="${LOG_FILE:-/var/log/mikrotik-cert-push.log}"
 
 # PKCS12 password (used only during transport)
-P12_PASS="change-this-password"
+P12_PASS="${P12_PASS:-change-this-password}"
 
-# SSH options
-SSH_OPTS="-o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=10"
+# SSH/SCP options
+SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=10}"
+SCP_OPTS="${SCP_OPTS:-$SSH_OPTS}"
 
 #######################################
-# END CONFIGURATION
+# FUNCTIONS
 #######################################
 
 log() {
@@ -108,7 +109,7 @@ push_cert() {
 
     # Upload PKCS12 to MikroTik
     log "  Uploading PKCS12 bundle..."
-    scp $SSH_OPTS "$p12_file" "${mikrotik_user}@${mikrotik_host}:${domain}.p12" || {
+    scp $SCP_OPTS "$p12_file" "${mikrotik_user}@${mikrotik_host}:${domain}.p12" || {
         log "ERROR: Failed to upload PKCS12"
         rm -f "$p12_file"
         return 1
@@ -151,20 +152,23 @@ push_cert() {
 }
 
 #######################################
-# MAIN - Configure your devices here
+# MAIN
+# Only runs when executed directly, not when sourced
 #######################################
 
-log "=== MikroTik Certificate Push Started ==="
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    log "=== MikroTik Certificate Push Started ==="
 
-# Push to each MikroTik device
-# Format: push_cert "domain" "ip-address" "username"
+    # Push to each MikroTik device
+    # Format: push_cert "domain" "ip-address" "username"
 
-# Example devices - uncomment and modify as needed:
-# push_cert "router.example.com" "192.168.1.1" "cert-push"
-# push_cert "switch.example.com" "192.168.1.2" "cert-push"
-# push_cert "ap.example.com" "192.168.1.3" "cert-push"
+    # Example devices - uncomment and modify as needed:
+    # push_cert "router.example.com" "192.168.1.1" "cert-push"
+    # push_cert "switch.example.com" "192.168.1.2" "cert-push"
+    # push_cert "ap.example.com" "192.168.1.3" "cert-push"
 
-# Remove this line after configuring your devices:
-log "WARNING: No devices configured! Edit the script to add your MikroTik devices."
+    # Remove this line after configuring your devices:
+    log "WARNING: No devices configured! Edit the script to add your MikroTik devices."
 
-log "=== MikroTik Certificate Push Completed ==="
+    log "=== MikroTik Certificate Push Completed ==="
+fi
