@@ -5,7 +5,6 @@
 #
 
 STATE_DIR="/state"
-CERT_PATH="/etc/stunnel/stunnel.pem"
 
 # Parse the command passed via SSH -c
 if [[ "$1" == "-c" ]]; then
@@ -28,21 +27,21 @@ if [[ "$CMD" =~ ^echo.*ready ]]; then
     exit 0
 fi
 
-# Handle sudo cat for reading certificate
-if [[ "$CMD" =~ sudo.*-S.*cat.*/etc/stunnel/stunnel.pem ]]; then
+# Handle sudo cat for reading certificate (fingerprint check)
+# Command: echo 'pass' | sudo -S cat /etc/stunnel/stunnel.pem 2>/dev/null | openssl x509 ...
+# We need to execute the full pipe to get the fingerprint output
+if [[ "$CMD" =~ sudo.*cat.*/etc/stunnel/stunnel.pem.*openssl ]]; then
     if [[ -f "$STATE_DIR/stunnel.pem" ]]; then
-        cat "$STATE_DIR/stunnel.pem"
+        # Execute the openssl part to get fingerprint
+        cat "$STATE_DIR/stunnel.pem" | openssl x509 -noout -fingerprint -sha256 2>/dev/null
     fi
     exit 0
 fi
 
-# Handle multi-command sudo operations (certificate installation)
-# This handles the compound command for backup, copy, chmod, chown, rm
-if [[ "$CMD" =~ sudo.*-S.*cp.*stunnel.pem ]]; then
-    # Extract the source PEM file from the command
-    # Command format: echo 'pass' | sudo -S cp ~/domain.pem /etc/stunnel/stunnel.pem
-
-    # Find PEM files in home directory
+# Handle multi-line sudo operations (certificate installation)
+# The command contains multiple lines with sudo cp, chmod, chown, rm
+if [[ "$CMD" =~ sudo.*cp.*\.pem ]]; then
+    # Find PEM files in home directory and copy to state
     for pem in /home/qnap/*.pem; do
         if [[ -f "$pem" ]]; then
             cp "$pem" "$STATE_DIR/stunnel.pem"
@@ -53,7 +52,7 @@ if [[ "$CMD" =~ sudo.*-S.*cp.*stunnel.pem ]]; then
 fi
 
 # Handle web server restart
-if [[ "$CMD" =~ sudo.*-S.*/etc/init.d/thttpd.sh ]]; then
+if [[ "$CMD" =~ /etc/init.d/thttpd.sh ]]; then
     echo "Stopping QNAP web server..."
     echo "Starting QNAP web server..."
     exit 0
