@@ -1,6 +1,10 @@
-# Let's Encrypt SSL for MikroTik via Caddy + Cloudflare DNS
+# Cloudflare Let's Encrypt Cert Syncer
 
-Automatically provision and renew valid Let's Encrypt SSL certificates for MikroTik RouterOS devices without opening any ports.
+[![Integration Tests](https://github.com/lioreshai/cloudflare-letsencrypt-cert-syncer/actions/workflows/test.yml/badge.svg)](https://github.com/lioreshai/cloudflare-letsencrypt-cert-syncer/actions/workflows/test.yml)
+
+Automatically provision and renew Let's Encrypt SSL certificates for MikroTik RouterOS devices without opening any ports to the internet.
+
+Uses **Caddy** with **Cloudflare DNS-01 challenge** for secure, firewall-friendly certificate management.
 
 ## The Problem
 
@@ -318,7 +322,19 @@ pfSense uses a PHP-based configuration system. The script needs to:
 
 **Gotcha:** pfSense has sshguard which blocks IPs with failed SSH attempts. If connections start timing out, check `pfctl -t sshguard -T show`.
 
-For detailed implementation, see the handler scripts in the companion repository.
+## Testing
+
+The project includes integration tests to verify the core mechanisms work correctly.
+
+```bash
+# Run CI tests (uses mock MikroTik, fast)
+./tests/run_tests.sh
+
+# Run full RouterOS tests (requires KVM, slower but more thorough)
+./tests/run_tests_routeros.sh
+```
+
+See [tests/README.md](tests/README.md) for details.
 
 ## License
 

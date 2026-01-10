@@ -1,0 +1,107 @@
+#!/bin/bash
+#
+# Mock MikroTik shell for testing cert-push script
+# Simulates RouterOS command responses for certificate operations
+#
+
+STATE_DIR="/state"
+FILES_DIR="/files"
+
+# Parse the command passed via SSH -c
+if [[ "$1" == "-c" ]]; then
+    CMD="$2"
+else
+    CMD="$*"
+fi
+
+# Log command for debugging
+echo "[$(date -Iseconds)] CMD: $CMD" >> /state/command.log
+
+# Handle scp (file transfers)
+if [[ "$CMD" =~ ^scp ]]; then
+    exec /usr/bin/scp "$@"
+fi
+
+# Handle MikroTik-style commands
+case "$CMD" in
+    *"/certificate get"*"fingerprint"*)
+        # Extract common-name from command
+        CN=$(echo "$CMD" | grep -oP 'common-name=\K[^\]]+' || echo "")
+        CERT_FILE="$STATE_DIR/cert_${CN}.fingerprint"
+        if [[ -f "$CERT_FILE" ]]; then
+            cat "$CERT_FILE"
+        fi
+        ;;
+
+    *"/certificate remove"*)
+        # Extract common-name and remove state
+        CN=$(echo "$CMD" | grep -oP 'common-name=\K[^\]]+' || echo "")
+        rm -f "$STATE_DIR/cert_${CN}.fingerprint" "$STATE_DIR/cert_${CN}.imported" 2>/dev/null
+        ;;
+
+    *"/certificate import"*)
+        # Extract filename and passphrase
+        FILENAME=$(echo "$CMD" | grep -oP 'file-name=\K[^ ]+' || echo "")
+        PASSPHRASE=$(echo "$CMD" | grep -oP 'passphrase=\K[^ ]+' || echo "")
+
+        # Get the uploaded file
+        P12_FILE="/home/cert-push/$FILENAME"
+
+        if [[ -f "$P12_FILE" ]]; then
+            # Extract domain from filename (domain.p12 -> domain)
+            DOMAIN="${FILENAME%.p12}"
+
+            # Try to extract certificate from PKCS12
+            CERT_OUT=$(openssl pkcs12 -in "$P12_FILE" -clcerts -nokeys -passin "pass:$PASSPHRASE" 2>&1)
+
+            if echo "$CERT_OUT" | grep -q "BEGIN CERTIFICATE"; then
+                # Get fingerprint from the PKCS12
+                FINGERPRINT=$(openssl pkcs12 -in "$P12_FILE" -clcerts -nokeys -passin "pass:$PASSPHRASE" 2>/dev/null | \
+                    openssl x509 -fingerprint -sha256 -noout 2>/dev/null | \
+                    cut -d= -f2 | tr -d ':' | tr '[:upper:]' '[:lower:]')
+
+                # Count certificates in chain
+                CERT_COUNT=$(openssl pkcs12 -in "$P12_FILE" -nokeys -passin "pass:$PASSPHRASE" 2>/dev/null | \
+                    grep -c "BEGIN CERTIFICATE" || echo "0")
+
+                # Check for private key
+                KEY_COUNT=$(openssl pkcs12 -in "$P12_FILE" -nocerts -passin "pass:$PASSPHRASE" -passout "pass:temp" 2>/dev/null | \
+                    grep -c "BEGIN" || echo "0")
+
+                # Store the fingerprint for later queries
+                echo "$FINGERPRINT" > "$STATE_DIR/cert_${DOMAIN}.fingerprint"
+                echo "imported" > "$STATE_DIR/cert_${DOMAIN}.imported"
+
+                # Output MikroTik-style import result
+                echo "     certificates-imported: $CERT_COUNT"
+                echo "     private-keys-imported: $KEY_COUNT"
+                echo "            files-imported: 1"
+                echo "       decryption-failures: 0"
+                echo "  keys-with-no-certificate: 0"
+            else
+                echo "     certificates-imported: 0"
+                echo "     private-keys-imported: 0"
+                echo "            files-imported: 0"
+                echo "       decryption-failures: 1"
+                echo "  keys-with-no-certificate: 0"
+            fi
+        else
+            echo "failure: file not found"
+        fi
+        ;;
+
+    *"/ip service set www-ssl"*)
+        # Just acknowledge the command
+        ;;
+
+    *"/file remove"*)
+        # Extract filename and remove if exists
+        FILENAME=$(echo "$CMD" | grep -oP '\"[^\"]+\"' | tr -d '"' || echo "")
+        rm -f "/home/cert-push/$FILENAME" 2>/dev/null
+        ;;
+
+    *)
+        # Unknown command - log and ignore
+        echo "[MOCK] Unknown command: $CMD" >> /state/unknown.log
+        ;;
+esac

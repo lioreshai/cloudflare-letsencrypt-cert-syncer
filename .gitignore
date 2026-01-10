@@ -1,0 +1,25 @@
+# Environment files (contain secrets)
+.env
+
+# Test artifacts
+tests/tmp/
+tests/mock-mikrotik/state/authorized_keys
+tests/mock-mikrotik/state/*.log
+tests/mock-mikrotik/state/*.fingerprint
+tests/mock-mikrotik/state/*.imported
+
+# Temporary files
+*.p12
+*.log
+/tmp/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
