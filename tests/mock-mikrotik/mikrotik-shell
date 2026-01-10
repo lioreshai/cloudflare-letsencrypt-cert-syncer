@@ -24,6 +24,11 @@ fi
 
 # Handle MikroTik-style commands
 case "$CMD" in
+    "echo "*)
+        # Handle basic echo for readiness checks
+        echo "${CMD#echo }"
+        ;;
+
     *"/certificate get"*"fingerprint"*)
         # Extract common-name from command
         CN=$(echo "$CMD" | grep -oP 'common-name=\K[^\]]+' || echo "")

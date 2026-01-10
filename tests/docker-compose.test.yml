@@ -1,5 +1,3 @@
-version: "3.8"
-
 # Test infrastructure for cloudflare-letsencrypt-cert-syncer
 # Provides a mock MikroTik SSH endpoint for integration testing
 
