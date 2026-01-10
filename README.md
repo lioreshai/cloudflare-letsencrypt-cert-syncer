@@ -58,13 +58,12 @@ Use **Caddy** as a certificate manager with **Cloudflare DNS-01 challenge**:
 ## Project Structure
 
 ```
-├── cert-push.sh           # Main dispatcher script
+├── cert-push.sh           # Main script
 ├── lib/
 │   ├── mikrotik.sh        # MikroTik handler (PKCS12)
 │   ├── pfsense.sh         # pfSense handler (PHP API)
 │   └── qnap.sh            # QNAP handler (PEM bundle)
-├── mikrotik-cert-push.sh  # Standalone MikroTik-only script
-└── tests/                 # Integration tests with Docker mocks
+└── tests/                 # Integration tests
 ```
 
 ## Requirements
@@ -288,18 +287,14 @@ PKCS12 encryption incompatible. The script uses legacy flags automatically.
 
 ## Testing
 
-Integration tests verify all handlers against Docker mock servers.
+Integration tests verify the MikroTik handler against a mock SSH server.
 
 ```bash
 cd tests
 ./run_tests.sh
 ```
 
-See [tests/README.md](tests/README.md) for details.
-
-## Standalone MikroTik Script
-
-If you only need MikroTik support, use the standalone `mikrotik-cert-push.sh` which has no dependencies on the `lib/` handlers.
+Tests cover fingerprint comparison logic and PKCS12 format compatibility. See [tests/README.md](tests/README.md) for details.
 
 ## Security Considerations
 
