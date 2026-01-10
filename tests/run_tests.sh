@@ -137,9 +137,8 @@ test_pkcs12_creation() {
 
     # Verify PKCS12 can be read
     local cert_count
-    cert_count=$(openssl pkcs12 -in "$p12_file" -nokeys -passin "pass:$TEST_P12_PASS" 2>/dev/null | \
-        grep -c "BEGIN CERTIFICATE" || true)
-    cert_count=${cert_count:-0}
+    cert_count=$( { openssl pkcs12 -in "$p12_file" -nokeys -passin "pass:$TEST_P12_PASS" 2>/dev/null | \
+        grep -c "BEGIN CERTIFICATE"; } 2>/dev/null ) || cert_count=0
 
     if [[ "$cert_count" -ge 1 ]]; then
         log_pass "PKCS12 bundle created successfully (contains $cert_count certificates)"
@@ -150,9 +149,8 @@ test_pkcs12_creation() {
 
     # Verify private key is included
     local key_present
-    key_present=$(openssl pkcs12 -in "$p12_file" -nocerts -passin "pass:$TEST_P12_PASS" \
-        -passout "pass:temp" 2>/dev/null | grep -c "BEGIN" || true)
-    key_present=${key_present:-0}
+    key_present=$( { openssl pkcs12 -in "$p12_file" -nocerts -passin "pass:$TEST_P12_PASS" \
+        -passout "pass:temp" 2>/dev/null | grep -c "BEGIN"; } 2>/dev/null ) || key_present=0
 
     if [[ "$key_present" -ge 1 ]]; then
         log_pass "PKCS12 bundle contains private key"
