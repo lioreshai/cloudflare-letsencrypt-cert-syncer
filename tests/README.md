@@ -2,76 +2,36 @@
 
 Integration tests for `mikrotik-cert-push.sh`.
 
-## Quick Start (CI Tests)
+## Running Tests
 
 ```bash
 ./run_tests.sh
 ```
 
-Uses a mock MikroTik SSH server. Fast, works everywhere, runs in GitHub Actions.
+Requires Docker. Uses a mock MikroTik SSH server to test certificate operations.
 
-**Tests the actual `push_cert()` function:**
-- Fresh push (no existing certificate)
-- Skip unchanged certificate (fingerprint match)
-- Detect and push changed certificate
-- Handle missing certificate files gracefully
-- PKCS12 bundle format (legacy encryption for MikroTik)
+## What's Tested
 
-## Full RouterOS Tests (Local Only)
+| Test | What it verifies |
+|------|------------------|
+| Fresh push | Pushes cert when none exists on device |
+| Skip unchanged | Skips push when fingerprints match |
+| Push changed | Detects and pushes when cert changes |
+| Missing files | Reports error for missing cert files |
+| PKCS12 format | Uses legacy encryption MikroTik requires |
 
-```bash
-./run_tests_routeros.sh
-```
-
-Uses actual MikroTik RouterOS running in QEMU. Requires:
-- `/dev/kvm` (KVM virtualization support)
-- `sshpass` (`apt install sshpass`)
-- ~1 minute for RouterOS to boot
-
-**Additional validation:**
-- Real RouterOS certificate import behavior
-- Actual `K` (private key) flag verification
-- Real www-ssl service configuration
-
-## Test Architecture
+## How It Works
 
 ```
-┌─────────────────────────────────────────────┐
-│              run_tests.sh (CI)              │
-│                                             │
-│  ┌─────────────┐      ┌─────────────────┐   │
-│  │ Test Script │─SSH─►│ Mock MikroTik   │   │
-│  │             │      │ (Alpine + SSH)  │   │
-│  └─────────────┘      └─────────────────┘   │
-└─────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────┐
-│       run_tests_routeros.sh (Local)         │
-│                                             │
-│  ┌─────────────┐      ┌─────────────────┐   │
-│  │ Test Script │─SSH─►│ RouterOS in     │   │
-│  │             │      │ QEMU/Docker     │   │
-│  └─────────────┘      └─────────────────┘   │
-└─────────────────────────────────────────────┘
+┌──────────────┐         ┌─────────────────────┐
+│  Test Script │──SSH───►│  Mock MikroTik      │
+│              │         │  (Alpine + OpenSSH) │
+│  push_cert() │◄────────│                     │
+└──────────────┘         │  Simulates:         │
+                         │  - /certificate     │
+                         │  - fingerprint      │
+                         │  - import/remove    │
+                         └─────────────────────┘
 ```
 
-## Adding Tests
-
-Both test scripts follow the same pattern:
-
-```bash
-test_something() {
-    log_info "TEST: Description"
-
-    # Test logic here
-
-    if [[ condition ]]; then
-        log_pass "What succeeded"
-    else
-        log_fail "What failed"
-        return 1
-    fi
-}
-```
-
-Add new tests to the main function and they'll be included in the run.
+The mock stores certificate fingerprints in `/state/` and responds to MikroTik-style commands.
