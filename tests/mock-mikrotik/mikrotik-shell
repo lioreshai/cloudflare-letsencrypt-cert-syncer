@@ -2,6 +2,7 @@
 #
 # Mock MikroTik shell for testing cert-push script
 # Simulates RouterOS command responses for certificate operations
+# Uses POSIX-compatible patterns (no grep -P, for BusyBox compatibility)
 #
 
 STATE_DIR="/state"
@@ -22,6 +23,13 @@ if [[ "$CMD" =~ ^scp ]]; then
     exec /usr/bin/scp "$@"
 fi
 
+# Helper: extract value after key= (POSIX compatible)
+extract_value() {
+    local key="$1"
+    local str="$2"
+    echo "$str" | sed -n "s/.*${key}=\([^ ]*\).*/\1/p" | head -1
+}
+
 # Handle MikroTik-style commands
 case "$CMD" in
     "echo "*)
@@ -30,8 +38,8 @@ case "$CMD" in
         ;;
 
     *"/certificate get"*"fingerprint"*)
-        # Extract common-name from command
-        CN=$(echo "$CMD" | grep -oP 'common-name=\K[^\]]+' || echo "")
+        # Extract common-name from command (format: common-name=VALUE])
+        CN=$(echo "$CMD" | sed -n 's/.*common-name=\([^]]*\).*/\1/p')
         CERT_FILE="$STATE_DIR/cert_${CN}.fingerprint"
         if [[ -f "$CERT_FILE" ]]; then
             cat "$CERT_FILE"
@@ -40,14 +48,14 @@ case "$CMD" in
 
     *"/certificate remove"*)
         # Extract common-name and remove state
-        CN=$(echo "$CMD" | grep -oP 'common-name=\K[^\]]+' || echo "")
+        CN=$(echo "$CMD" | sed -n 's/.*common-name=\([^]]*\).*/\1/p')
         rm -f "$STATE_DIR/cert_${CN}.fingerprint" "$STATE_DIR/cert_${CN}.imported" 2>/dev/null
         ;;
 
     *"/certificate import"*)
         # Extract filename and passphrase
-        FILENAME=$(echo "$CMD" | grep -oP 'file-name=\K[^ ]+' || echo "")
-        PASSPHRASE=$(echo "$CMD" | grep -oP 'passphrase=\K[^ ]+' || echo "")
+        FILENAME=$(extract_value "file-name" "$CMD")
+        PASSPHRASE=$(extract_value "passphrase" "$CMD")
 
         # Get the uploaded file
         P12_FILE="/home/cert-push/$FILENAME"
@@ -67,11 +75,11 @@ case "$CMD" in
 
                 # Count certificates in chain
                 CERT_COUNT=$(openssl pkcs12 -in "$P12_FILE" -nokeys -passin "pass:$PASSPHRASE" 2>/dev/null | \
-                    grep -c "BEGIN CERTIFICATE" || echo "0")
+                    grep -c "BEGIN CERTIFICATE") || CERT_COUNT=0
 
                 # Check for private key
                 KEY_COUNT=$(openssl pkcs12 -in "$P12_FILE" -nocerts -passin "pass:$PASSPHRASE" -passout "pass:temp" 2>/dev/null | \
-                    grep -c "BEGIN" || echo "0")
+                    grep -c "BEGIN") || KEY_COUNT=0
 
                 # Store the fingerprint for later queries
                 echo "$FINGERPRINT" > "$STATE_DIR/cert_${DOMAIN}.fingerprint"
@@ -100,8 +108,8 @@ case "$CMD" in
         ;;
 
     *"/file remove"*)
-        # Extract filename and remove if exists
-        FILENAME=$(echo "$CMD" | grep -oP '\"[^\"]+\"' | tr -d '"' || echo "")
+        # Extract filename (in quotes)
+        FILENAME=$(echo "$CMD" | sed -n 's/.*"\([^"]*\)".*/\1/p')
         rm -f "/home/cert-push/$FILENAME" 2>/dev/null
         ;;
 
