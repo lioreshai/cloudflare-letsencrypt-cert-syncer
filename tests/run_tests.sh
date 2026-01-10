@@ -148,10 +148,12 @@ test_pkcs12_creation() {
     fi
 
     # Verify private key is included
+    set +e  # Disable errexit for this section
     local key_contents
     key_contents=$(openssl pkcs12 -in "$p12_file" -nocerts -passin "pass:$TEST_P12_PASS" \
-        -passout "pass:temp" 2>/dev/null) || true
-    key_present=$(echo "$key_contents" | grep -c "BEGIN") || key_present=0
+        -passout "pass:temp" 2>/dev/null)
+    key_present=$(echo "$key_contents" | grep -c "BEGIN" || echo "0")
+    set -e  # Re-enable errexit
 
     if [[ "$key_present" -ge 1 ]]; then
         log_pass "PKCS12 bundle contains private key"
