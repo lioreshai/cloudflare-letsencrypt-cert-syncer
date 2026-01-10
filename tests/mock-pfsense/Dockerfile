@@ -3,7 +3,7 @@ FROM alpine:3.19
 # Mock pfSense SSH server for testing cert-push script
 # Responds to pfSense-style PHP commands and stores certificate state
 
-RUN apk add --no-cache openssh-server openssl bash
+RUN apk add --no-cache openssh-server openssl bash shadow
 
 # Create root user for pfSense-style access
 RUN mkdir -p /root/.ssh && \
