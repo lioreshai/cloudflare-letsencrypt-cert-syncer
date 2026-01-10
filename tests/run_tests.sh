@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# Integration tests for cloudflare-letsencrypt-cert-syncer
-# Tests the cert-push script against a mock MikroTik SSH endpoint
+# Integration tests for mikrotik-cert-push.sh
+# Tests the actual push_cert function against a mock MikroTik SSH endpoint
 #
 
 set -euo pipefail
@@ -20,24 +20,14 @@ MOCK_USER="cert-push"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 TESTS_PASSED=0
 TESTS_FAILED=0
 
-log_info() {
-    echo -e "${YELLOW}[INFO]${NC} $*"
-}
-
-log_pass() {
-    echo -e "${GREEN}[PASS]${NC} $*"
-    ((++TESTS_PASSED)) || true
-}
-
-log_fail() {
-    echo -e "${RED}[FAIL]${NC} $*"
-    ((++TESTS_FAILED)) || true
-}
+log_info() { echo -e "${YELLOW}[INFO]${NC} $*"; }
+log_pass() { echo -e "${GREEN}[PASS]${NC} $*"; ((++TESTS_PASSED)) || true; }
+log_fail() { echo -e "${RED}[FAIL]${NC} $*"; ((++TESTS_FAILED)) || true; }
 
 cleanup() {
     log_info "Cleaning up..."
@@ -52,16 +42,13 @@ trap cleanup EXIT
 setup_test_environment() {
     log_info "Setting up test environment..."
 
-    # Create temp directory for test certificates
     mkdir -p "$SCRIPT_DIR/tmp/certs/$TEST_DOMAIN"
+    mkdir -p "$SCRIPT_DIR/mock-mikrotik/state"
 
     # Generate SSH key pair for tests
     if [[ ! -f "$SCRIPT_DIR/tmp/test_key" ]]; then
         ssh-keygen -t ed25519 -f "$SCRIPT_DIR/tmp/test_key" -N "" -q
     fi
-
-    # Copy public key to mock-mikrotik state directory
-    mkdir -p "$SCRIPT_DIR/mock-mikrotik/state"
     cp "$SCRIPT_DIR/tmp/test_key.pub" "$SCRIPT_DIR/mock-mikrotik/state/authorized_keys"
 
     # Start mock MikroTik
@@ -70,7 +57,7 @@ setup_test_environment() {
     docker compose -f docker-compose.test.yml build --quiet
     docker compose -f docker-compose.test.yml up -d
 
-    # Wait for SSH to be ready
+    # Wait for SSH
     log_info "Waiting for SSH to be ready..."
     for i in {1..30}; do
         if ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=2 \
@@ -81,7 +68,6 @@ setup_test_environment() {
         fi
         sleep 1
     done
-
     log_fail "Mock MikroTik failed to start"
     docker compose -f docker-compose.test.yml logs
     return 1
@@ -92,37 +78,170 @@ generate_test_certificate() {
     local cert_dir="$SCRIPT_DIR/tmp/certs/$domain"
 
     log_info "Generating test certificate for $domain..."
+    mkdir -p "$cert_dir"
 
-    # Generate private key
     openssl genrsa -out "$cert_dir/$domain.key" 2048 2>/dev/null
-
-    # Generate self-signed certificate
     openssl req -new -x509 -key "$cert_dir/$domain.key" \
         -out "$cert_dir/$domain.crt" -days 30 \
         -subj "/CN=$domain" 2>/dev/null
 
-    # Also create a "chain" cert (self-signed intermediate for testing)
+    # Add intermediate cert to chain
     openssl req -new -x509 -key "$cert_dir/$domain.key" \
         -out "$cert_dir/chain.crt" -days 30 \
         -subj "/CN=Test Intermediate CA" 2>/dev/null
+    cat "$cert_dir/$domain.crt" "$cert_dir/chain.crt" > "$cert_dir/$domain.crt.tmp"
+    mv "$cert_dir/$domain.crt.tmp" "$cert_dir/$domain.crt"
+}
 
-    # Combine into full chain (cert + intermediate)
-    cat "$cert_dir/$domain.crt" "$cert_dir/chain.crt" > "$cert_dir/$domain.crt.full"
-    mv "$cert_dir/$domain.crt.full" "$cert_dir/$domain.crt"
+# Source the actual script to get push_cert function
+# We override config variables for testing
+source_push_cert() {
+    # Override configuration for testing
+    export CERT_BASE="$SCRIPT_DIR/tmp/certs"
+    export LOG_FILE="$SCRIPT_DIR/tmp/test.log"
+    export P12_PASS="$TEST_P12_PASS"
+    export SSH_OPTS="-o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=10 -i $SCRIPT_DIR/tmp/test_key -p $MOCK_PORT"
 
-    log_info "Certificate generated: $cert_dir/$domain.crt"
+    # Source just the functions from the script (not the main execution)
+    # Extract and eval just the function definitions
+    eval "$(sed -n '/^log()/,/^}$/p' "$PROJECT_DIR/mikrotik-cert-push.sh")"
+    eval "$(sed -n '/^push_cert()/,/^}$/p' "$PROJECT_DIR/mikrotik-cert-push.sh")"
 }
 
 # =============================================================================
-# TEST: PKCS12 bundle creation
+# TEST: push_cert with no existing certificate (fresh push)
 # =============================================================================
-test_pkcs12_creation() {
-    log_info "TEST: PKCS12 bundle creation with legacy encryption"
+test_fresh_push() {
+    log_info "TEST: push_cert() - fresh push (no existing cert on device)"
+
+    source_push_cert
+
+    # Clear any existing state in mock
+    ssh $SSH_OPTS "${MOCK_USER}@${MOCK_HOST}" \
+        "/certificate remove [find where common-name=$TEST_DOMAIN]" 2>/dev/null || true
+
+    # Run the actual push_cert function
+    local output
+    output=$(push_cert "$TEST_DOMAIN" "$MOCK_HOST" "$MOCK_USER" 2>&1) || true
+
+    # Verify it detected no existing cert
+    if echo "$output" | grep -q "No existing certificate found"; then
+        log_pass "Correctly detected no existing certificate"
+    else
+        log_fail "Did not detect missing certificate"
+        echo "$output"
+        return 1
+    fi
+
+    # Verify it pushed the cert
+    if echo "$output" | grep -q "Done! www-ssl enabled"; then
+        log_pass "Successfully pushed certificate"
+    else
+        log_fail "Failed to push certificate"
+        echo "$output"
+        return 1
+    fi
+
+    # Verify certificate is now on "device"
+    local fingerprint
+    fingerprint=$(ssh $SSH_OPTS "${MOCK_USER}@${MOCK_HOST}" \
+        ":put [/certificate get [find where common-name=$TEST_DOMAIN] fingerprint]" 2>/dev/null)
+
+    if [[ -n "$fingerprint" ]]; then
+        log_pass "Certificate now exists on device"
+    else
+        log_fail "Certificate not found on device after push"
+        return 1
+    fi
+}
+
+# =============================================================================
+# TEST: push_cert skips when fingerprint matches (idempotent)
+# =============================================================================
+test_skip_unchanged() {
+    log_info "TEST: push_cert() - skip when certificate unchanged"
+
+    source_push_cert
+
+    # Run push_cert again with same cert (should skip)
+    local output
+    output=$(push_cert "$TEST_DOMAIN" "$MOCK_HOST" "$MOCK_USER" 2>&1) || true
+
+    if echo "$output" | grep -q "Certificate unchanged, skipping push"; then
+        log_pass "Correctly skipped unchanged certificate"
+    else
+        log_fail "Did not skip unchanged certificate"
+        echo "$output"
+        return 1
+    fi
+}
+
+# =============================================================================
+# TEST: push_cert detects changed certificate
+# =============================================================================
+test_detect_changed() {
+    log_info "TEST: push_cert() - detect and push changed certificate"
+
+    source_push_cert
+
+    # Generate a NEW certificate (different fingerprint)
+    local cert_dir="$SCRIPT_DIR/tmp/certs/$TEST_DOMAIN"
+    openssl genrsa -out "$cert_dir/$TEST_DOMAIN.key" 2048 2>/dev/null
+    openssl req -new -x509 -key "$cert_dir/$TEST_DOMAIN.key" \
+        -out "$cert_dir/$TEST_DOMAIN.crt" -days 30 \
+        -subj "/CN=$TEST_DOMAIN" 2>/dev/null
+
+    # Run push_cert with new cert
+    local output
+    output=$(push_cert "$TEST_DOMAIN" "$MOCK_HOST" "$MOCK_USER" 2>&1) || true
+
+    if echo "$output" | grep -q "Certificate changed, pushing new cert"; then
+        log_pass "Correctly detected certificate change"
+    else
+        log_fail "Did not detect certificate change"
+        echo "$output"
+        return 1
+    fi
+
+    if echo "$output" | grep -q "Done! www-ssl enabled"; then
+        log_pass "Successfully pushed new certificate"
+    else
+        log_fail "Failed to push new certificate"
+        return 1
+    fi
+}
+
+# =============================================================================
+# TEST: push_cert handles missing certificate files
+# =============================================================================
+test_missing_cert_files() {
+    log_info "TEST: push_cert() - handle missing certificate files"
+
+    source_push_cert
+
+    # Try to push a domain that doesn't have cert files
+    local output
+    output=$(push_cert "nonexistent.example.com" "$MOCK_HOST" "$MOCK_USER" 2>&1) || true
+
+    if echo "$output" | grep -q "ERROR: Certificate files not found"; then
+        log_pass "Correctly reported missing certificate files"
+    else
+        log_fail "Did not report missing certificate files"
+        echo "$output"
+        return 1
+    fi
+}
+
+# =============================================================================
+# TEST: PKCS12 bundle has correct format for MikroTik
+# =============================================================================
+test_pkcs12_format() {
+    log_info "TEST: PKCS12 bundle format (legacy encryption for MikroTik)"
 
     local cert_dir="$SCRIPT_DIR/tmp/certs/$TEST_DOMAIN"
-    local p12_file="$SCRIPT_DIR/tmp/test.p12"
+    local p12_file="$SCRIPT_DIR/tmp/test_format.p12"
 
-    # Create PKCS12 with legacy encryption (same as cert-push script)
+    # Create PKCS12 using the exact same command as the script
     openssl pkcs12 -export \
         -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 \
         -out "$p12_file" \
@@ -130,198 +249,34 @@ test_pkcs12_creation() {
         -in "$cert_dir/$TEST_DOMAIN.crt" \
         -passout "pass:$TEST_P12_PASS" 2>/dev/null
 
-    if [[ ! -f "$p12_file" ]]; then
-        log_fail "PKCS12 file was not created"
-        return 1
-    fi
+    # Verify it can be read (proves format is valid)
+    local p12_info
+    p12_info=$(openssl pkcs12 -in "$p12_file" -info -passin "pass:$TEST_P12_PASS" -noout 2>&1) || true
 
-    # Verify PKCS12 can be read - use temp file to avoid pipefail issues
-    local p12_contents cert_count key_present
-    p12_contents=$(openssl pkcs12 -in "$p12_file" -nokeys -passin "pass:$TEST_P12_PASS" 2>/dev/null) || true
-    cert_count=$(echo "$p12_contents" | grep -c "BEGIN CERTIFICATE") || cert_count=0
-
-    if [[ "$cert_count" -ge 1 ]]; then
-        log_pass "PKCS12 bundle created successfully (contains $cert_count certificates)"
+    # Check for legacy encryption markers
+    if echo "$p12_info" | grep -qi "pbeWithSHA1And3-KeyTripleDES-CBC\|sha1"; then
+        log_pass "PKCS12 uses legacy encryption (MikroTik compatible)"
     else
-        log_fail "PKCS12 bundle is empty or invalid"
-        return 1
+        log_fail "PKCS12 may not use legacy encryption"
+        echo "$p12_info"
     fi
 
-    # Verify private key is included
-    local key_contents
-    key_contents=$(openssl pkcs12 -in "$p12_file" -nocerts -passin "pass:$TEST_P12_PASS" \
+    # Verify cert and key are both present
+    local contents
+    contents=$(openssl pkcs12 -in "$p12_file" -passin "pass:$TEST_P12_PASS" \
         -passout "pass:temp" 2>/dev/null) || true
-    key_present=$(echo "$key_contents" | grep -c "BEGIN") || key_present=0
 
-    if [[ "$key_present" -ge 1 ]]; then
-        log_pass "PKCS12 bundle contains private key"
+    local has_cert has_key
+    has_cert=$(echo "$contents" | grep -c "BEGIN CERTIFICATE") || has_cert=0
+    has_key=$(echo "$contents" | grep -c "BEGIN.*PRIVATE KEY") || has_key=0
+
+    if [[ "$has_cert" -ge 1 && "$has_key" -ge 1 ]]; then
+        log_pass "PKCS12 contains certificate and private key"
     else
-        log_fail "PKCS12 bundle missing private key"
-        return 1
+        log_fail "PKCS12 missing certificate or key (cert=$has_cert, key=$has_key)"
     fi
 
     rm -f "$p12_file"
-}
-
-# =============================================================================
-# TEST: Fingerprint extraction
-# =============================================================================
-test_fingerprint_extraction() {
-    log_info "TEST: Certificate fingerprint extraction"
-
-    local cert_dir="$SCRIPT_DIR/tmp/certs/$TEST_DOMAIN"
-
-    # Extract fingerprint (same method as cert-push script)
-    local fingerprint
-    fingerprint=$(openssl x509 -in "$cert_dir/$TEST_DOMAIN.crt" -noout -fingerprint -sha256 2>/dev/null | \
-        cut -d= -f2 | tr -d ':' | tr '[:upper:]' '[:lower:]')
-
-    if [[ -n "$fingerprint" && ${#fingerprint} -eq 64 ]]; then
-        log_pass "Fingerprint extracted: ${fingerprint:0:16}... (64 chars)"
-    else
-        log_fail "Failed to extract valid fingerprint (got: $fingerprint)"
-        return 1
-    fi
-}
-
-# =============================================================================
-# TEST: SSH connection to mock MikroTik
-# =============================================================================
-test_ssh_connection() {
-    log_info "TEST: SSH connection to mock MikroTik"
-
-    local result
-    result=$(ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 \
-        -i "$SCRIPT_DIR/tmp/test_key" -p "$MOCK_PORT" "$MOCK_USER@$MOCK_HOST" \
-        "echo connected" 2>&1)
-
-    if echo "$result" | grep -q "connected"; then
-        log_pass "SSH connection successful"
-    else
-        log_fail "SSH connection failed: $result"
-        return 1
-    fi
-}
-
-# =============================================================================
-# TEST: SCP file upload
-# =============================================================================
-test_scp_upload() {
-    log_info "TEST: SCP file upload to mock MikroTik"
-
-    local test_file="$SCRIPT_DIR/tmp/scp_test.txt"
-    echo "test content" > "$test_file"
-
-    scp -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 \
-        -i "$SCRIPT_DIR/tmp/test_key" -P "$MOCK_PORT" \
-        "$test_file" "$MOCK_USER@$MOCK_HOST:scp_test.txt" 2>&1
-
-    if [[ $? -eq 0 ]]; then
-        log_pass "SCP upload successful"
-    else
-        log_fail "SCP upload failed"
-        return 1
-    fi
-
-    rm -f "$test_file"
-}
-
-# =============================================================================
-# TEST: Certificate import (mock MikroTik command)
-# =============================================================================
-test_certificate_import() {
-    log_info "TEST: Certificate import via mock MikroTik"
-
-    local cert_dir="$SCRIPT_DIR/tmp/certs/$TEST_DOMAIN"
-    local p12_file="$SCRIPT_DIR/tmp/$TEST_DOMAIN.p12"
-
-    # Create PKCS12
-    openssl pkcs12 -export \
-        -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 \
-        -out "$p12_file" \
-        -inkey "$cert_dir/$TEST_DOMAIN.key" \
-        -in "$cert_dir/$TEST_DOMAIN.crt" \
-        -passout "pass:$TEST_P12_PASS" 2>/dev/null
-
-    # Upload PKCS12
-    scp -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 \
-        -i "$SCRIPT_DIR/tmp/test_key" -P "$MOCK_PORT" \
-        "$p12_file" "$MOCK_USER@$MOCK_HOST:$TEST_DOMAIN.p12" 2>&1
-
-    # Import certificate
-    local import_result
-    import_result=$(ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 \
-        -i "$SCRIPT_DIR/tmp/test_key" -p "$MOCK_PORT" "$MOCK_USER@$MOCK_HOST" \
-        "/certificate import file-name=$TEST_DOMAIN.p12 passphrase=$TEST_P12_PASS" 2>&1)
-
-    if echo "$import_result" | grep -q "private-keys-imported: 1"; then
-        log_pass "Certificate import successful (private key imported)"
-    else
-        log_fail "Certificate import failed: $import_result"
-        return 1
-    fi
-
-    # Verify certificate count
-    if echo "$import_result" | grep -q "certificates-imported: 2"; then
-        log_pass "Full certificate chain imported (2 certificates)"
-    else
-        log_info "Note: Expected 2 certificates in chain"
-    fi
-
-    rm -f "$p12_file"
-}
-
-# =============================================================================
-# TEST: Fingerprint comparison (unchanged cert should skip push)
-# =============================================================================
-test_fingerprint_comparison() {
-    log_info "TEST: Fingerprint comparison (skip unchanged cert)"
-
-    local cert_dir="$SCRIPT_DIR/tmp/certs/$TEST_DOMAIN"
-
-    # Get expected fingerprint
-    local expected_fingerprint
-    expected_fingerprint=$(openssl x509 -in "$cert_dir/$TEST_DOMAIN.crt" -noout -fingerprint -sha256 2>/dev/null | \
-        cut -d= -f2 | tr -d ':' | tr '[:upper:]' '[:lower:]')
-
-    # Query fingerprint from mock MikroTik (should return what we imported)
-    local stored_fingerprint
-    stored_fingerprint=$(ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 \
-        -i "$SCRIPT_DIR/tmp/test_key" -p "$MOCK_PORT" "$MOCK_USER@$MOCK_HOST" \
-        ":put [/certificate get [find where common-name=$TEST_DOMAIN] fingerprint]" 2>&1 | \
-        tr -d ':' | tr '[:upper:]' '[:lower:]' | tr -d '\r\n')
-
-    if [[ "$expected_fingerprint" == "$stored_fingerprint" ]]; then
-        log_pass "Fingerprint match - cert-push would skip (expected behavior)"
-    else
-        log_fail "Fingerprint mismatch: expected=$expected_fingerprint, got=$stored_fingerprint"
-        return 1
-    fi
-}
-
-# =============================================================================
-# TEST: Certificate removal
-# =============================================================================
-test_certificate_removal() {
-    log_info "TEST: Certificate removal from mock MikroTik"
-
-    # Remove certificate
-    ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 \
-        -i "$SCRIPT_DIR/tmp/test_key" -p "$MOCK_PORT" "$MOCK_USER@$MOCK_HOST" \
-        "/certificate remove [find where common-name=$TEST_DOMAIN]" 2>&1
-
-    # Verify it's gone
-    local fingerprint
-    fingerprint=$(ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 \
-        -i "$SCRIPT_DIR/tmp/test_key" -p "$MOCK_PORT" "$MOCK_USER@$MOCK_HOST" \
-        ":put [/certificate get [find where common-name=$TEST_DOMAIN] fingerprint]" 2>&1)
-
-    if [[ -z "$fingerprint" || "$fingerprint" == "" ]]; then
-        log_pass "Certificate removed successfully"
-    else
-        log_fail "Certificate still present after removal: $fingerprint"
-        return 1
-    fi
 }
 
 # =============================================================================
@@ -330,7 +285,7 @@ test_certificate_removal() {
 
 main() {
     echo "========================================"
-    echo "Integration Tests: cert-push"
+    echo "Integration Tests: mikrotik-cert-push.sh"
     echo "========================================"
     echo
 
@@ -338,21 +293,18 @@ main() {
     generate_test_certificate "$TEST_DOMAIN"
 
     echo
-    echo "Running tests..."
+    echo "Running tests against actual push_cert function..."
     echo "----------------------------------------"
 
-    # Run all tests
-    test_pkcs12_creation
-    test_fingerprint_extraction
-    test_ssh_connection
-    test_scp_upload
-    test_certificate_import
-    test_fingerprint_comparison
-    test_certificate_removal
+    test_fresh_push
+    test_skip_unchanged
+    test_detect_changed
+    test_missing_cert_files
+    test_pkcs12_format
 
     echo
     echo "========================================"
-    echo "Results: ${GREEN}$TESTS_PASSED passed${NC}, ${RED}$TESTS_FAILED failed${NC}"
+    echo -e "Results: ${GREEN}$TESTS_PASSED passed${NC}, ${RED}$TESTS_FAILED failed${NC}"
     echo "========================================"
 
     if [[ $TESTS_FAILED -gt 0 ]]; then

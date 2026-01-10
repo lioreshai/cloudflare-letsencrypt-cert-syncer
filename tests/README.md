@@ -1,6 +1,6 @@
 # Tests
 
-Integration tests for the cert-push script.
+Integration tests for `mikrotik-cert-push.sh`.
 
 ## Quick Start (CI Tests)
 
@@ -10,13 +10,12 @@ Integration tests for the cert-push script.
 
 Uses a mock MikroTik SSH server. Fast, works everywhere, runs in GitHub Actions.
 
-**Tests:**
-- PKCS12 bundle creation with legacy encryption
-- Certificate fingerprint extraction
-- SSH/SCP connectivity
-- Certificate import simulation
-- Fingerprint comparison logic
-- Certificate removal
+**Tests the actual `push_cert()` function:**
+- Fresh push (no existing certificate)
+- Skip unchanged certificate (fingerprint match)
+- Detect and push changed certificate
+- Handle missing certificate files gracefully
+- PKCS12 bundle format (legacy encryption for MikroTik)
 
 ## Full RouterOS Tests (Local Only)
 
