@@ -135,10 +135,10 @@ test_pkcs12_creation() {
         return 1
     fi
 
-    # Verify PKCS12 can be read
-    local cert_count
-    cert_count=$( { openssl pkcs12 -in "$p12_file" -nokeys -passin "pass:$TEST_P12_PASS" 2>/dev/null | \
-        grep -c "BEGIN CERTIFICATE"; } 2>/dev/null ) || cert_count=0
+    # Verify PKCS12 can be read - use temp file to avoid pipefail issues
+    local p12_contents cert_count key_present
+    p12_contents=$(openssl pkcs12 -in "$p12_file" -nokeys -passin "pass:$TEST_P12_PASS" 2>/dev/null) || true
+    cert_count=$(echo "$p12_contents" | grep -c "BEGIN CERTIFICATE") || cert_count=0
 
     if [[ "$cert_count" -ge 1 ]]; then
         log_pass "PKCS12 bundle created successfully (contains $cert_count certificates)"
@@ -148,9 +148,10 @@ test_pkcs12_creation() {
     fi
 
     # Verify private key is included
-    local key_present
-    key_present=$( { openssl pkcs12 -in "$p12_file" -nocerts -passin "pass:$TEST_P12_PASS" \
-        -passout "pass:temp" 2>/dev/null | grep -c "BEGIN"; } 2>/dev/null ) || key_present=0
+    local key_contents
+    key_contents=$(openssl pkcs12 -in "$p12_file" -nocerts -passin "pass:$TEST_P12_PASS" \
+        -passout "pass:temp" 2>/dev/null) || true
+    key_present=$(echo "$key_contents" | grep -c "BEGIN") || key_present=0
 
     if [[ "$key_present" -ge 1 ]]; then
         log_pass "PKCS12 bundle contains private key"
