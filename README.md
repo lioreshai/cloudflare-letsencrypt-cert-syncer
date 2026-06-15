@@ -219,8 +219,12 @@ Uses combined PEM format (key + cert) and sudo for elevated privileges.
 
 **Gotchas:**
 - Requires `SUDO_PASS` environment variable
-- Restarts thttpd web server after install
 - Certificate stored at `/etc/stunnel/stunnel.pem`
+- Restarts `/etc/init.d/stunnel.sh` after install. On QTS, HTTPS (`:443`) is
+  terminated by `apache_proxys` (`apache-sys-proxy-ssl.conf`), managed by
+  `stunnel.sh` — **not** by `thttpd`. Restarting `thttpd` updates the cert file
+  on disk but leaves `apache_proxys` serving the old cert from memory, so `:443`
+  keeps the stale cert until reboot. Restarting `stunnel.sh` reloads it.
 
 ## Environment Variables
 

@@ -99,12 +99,19 @@ push_qnap() {
         return 1
     }
 
-    # Restart web server (stop/start for clean SSL reload)
-    log "  Restarting QNAP web server..."
+    # Restart the SSL terminator so it reloads the cert from disk.
+    #
+    # IMPORTANT: on QTS, HTTPS (:443) is terminated by apache_proxys
+    # (apache-sys-proxy-ssl.conf), which is managed by /etc/init.d/stunnel.sh —
+    # NOT by thttpd. thttpd serves the plain-HTTP backend on localhost. So
+    # restarting thttpd updates /etc/stunnel/stunnel.pem on disk but leaves
+    # apache_proxys serving the OLD cert from memory, and :443 keeps the stale
+    # cert until the next reboot. Restart stunnel.sh to actually reload :443.
+    log "  Restarting QNAP SSL proxy (stunnel.sh -> apache_proxys :443)..."
     ssh $SSH_OPTS "${user}@${host}" \
-        "echo '$SUDO_PASS' | sudo -S /etc/init.d/thttpd.sh stop && sleep 2 && echo '$SUDO_PASS' | sudo -S /etc/init.d/thttpd.sh start" 2>&1 | \
+        "echo '$SUDO_PASS' | sudo -S /etc/init.d/stunnel.sh restart" 2>&1 | \
         grep -v "password" | grep -v "Password" | while read -r line; do log "    $line"; done
 
-    log "  Done! QNAP web server restarted with new certificate"
+    log "  Done! QNAP SSL proxy restarted with new certificate"
     return 0
 }
