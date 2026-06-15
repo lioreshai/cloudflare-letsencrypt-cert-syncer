@@ -206,12 +206,20 @@ Uses PKCS12 format with legacy encryption (PBE-SHA1-3DES) for compatibility.
 
 ### pfSense
 
-Uses PHP API via SSH to import certificates and configure webConfigurator.
+Uses the pfSense PHP API via SSH to import certificates and point the
+webConfigurator at them. Runs as a **single SSH connection** (see below).
 
 **Gotchas:**
-- Requires root SSH access
-- sshguard may block IPs with failed attempts (`pfctl -t sshguard -T show`)
-- Restarts webConfigurator after import
+- Your SSH key **must be authorized on pfSense** (System > User Manager > admin >
+  Authorized SSH Keys). A missing key fails as `Permission denied (publickey)` on
+  every run — and those failures feed sshguard.
+- **sshguard will block you** if the push opens many SSH/scp connections in a
+  burst (or repeatedly fails auth): the source IP lands in the `sshguard` pf
+  table and all pushes then time out. This handler is deliberately **one
+  connection per run** to stay under that threshold — do not split it back up.
+  Inspect/clear a stuck block on pfSense: `pfctl -t sshguard -T show` /
+  `pfctl -t sshguard -T flush` (delete-by-IP can report `0/1`; flush works).
+- Skips import + webConfigurator restart when the cert is unchanged.
 
 ### QNAP
 
